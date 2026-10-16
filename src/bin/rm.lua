@@ -1,21 +1,26 @@
--- /bin/rm.lua: Eliminar archivos o directorios
+-- /bin/rm.lua: Eliminar archivos o ramas de directorios (-r, -f)
 local args = { ... }
-local current_pwd = _G.PWD or "/"
+local recursive = false
+local force = false
+local targets = {}
 
-if #args == 0 then
-    print("rm: missing operand")
+for _, arg in ipairs(args) do
+    if string.sub(arg, 1, 1) == "-" then
+        if string.find(arg, "r") or string.find(arg, "R") then recursive = true end
+        if string.find(arg, "f") then force = true end
+    else
+        table.insert(targets, arg)
+    end
+end
+
+if #targets == 0 then
+    if not force then print("rm: missing operand") end
     return
 end
 
-for _, target in ipairs(args) do
-    local path = target
-    if string.sub(path, 1, 1) ~= "/" then
-        path = fs.combine(current_pwd, path)
-    end
-    
-    if not fs.exists(path) then
-        print("rm: cannot remove '" .. target .. "': No such file or directory")
-    else
-        fs.delete(path)
+for _, target in ipairs(targets) do
+    local ok, err = fs.delete(target, recursive)
+    if not ok and not force then
+        print("rm: cannot remove '" .. target .. "': " .. tostring(err))
     end
 end

@@ -1,21 +1,24 @@
 -- /bin/mkdir.lua: Crear directorios
 local args = { ... }
-local current_pwd = _G.PWD or "/"
+local parents = false
+local targets = {}
 
-if #args == 0 then
+for _, arg in ipairs(args) do
+    if arg == "-p" then
+        parents = true
+    else
+        table.insert(targets, arg)
+    end
+end
+
+if #targets == 0 then
     print("mkdir: missing operand")
     return
 end
 
-for _, dirname in ipairs(args) do
-    local path = dirname
-    if string.sub(path, 1, 1) ~= "/" then
-        path = fs.combine(current_pwd, path)
-    end
-    
-    if fs.exists(path) then
-        print("mkdir: cannot create directory '" .. dirname .. "': File exists")
-    else
-        fs.makeDir(path)
+for _, dirname in ipairs(targets) do
+    local ok, err = fs.makeDir(dirname, parents)
+    if not ok then
+        print("mkdir: cannot create directory '" .. dirname .. "': " .. tostring(err))
     end
 end

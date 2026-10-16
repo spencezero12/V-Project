@@ -1,8 +1,11 @@
--- /bin/uname.lua: Informacion del sistema
+-- /bin/uname.lua: Información dinámica del sistema
 local args = { ... }
+local sys_name = (ENV and ENV.HOSTNAME) or "V-Project"
+local sys_ver = (ENV and ENV.VERSION) or "unknown"
+local sys_arch = (ENV and ENV.ARCH) or "lua"
 
 if args[1] == "-a" then
-    print("V-Project 0.1.0-alpha CC-Tweaked-1.20.1 cobalt-lua5.1")
+    print(sys_name .. " " .. sys_ver .. " " .. sys_arch)
 else
-    print("V-Project")
+    print(sys_name)
 end

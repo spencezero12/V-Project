@@ -3,3 +3,4 @@
 .DS_Store
 *.luac
 .craftos/
+watch.sh
