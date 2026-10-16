@@ -1,10 +1,10 @@
--- /bin/ls.lua: Listar archivos y directorios
+-- /bin/ls.lua: Listar contenidos de directorio
 local args = { ... }
-local target_dir = args[1] or "/"
+local current_pwd = _G.PWD or "/"
+local target_dir = args[1] or current_pwd
 
--- Normalizar ruta relativa a absoluta básica
-if not string.find(target_dir, "^/") then
-    target_dir = "/" .. target_dir
+if string.sub(target_dir, 1, 1) ~= "/" then
+    target_dir = fs.combine(current_pwd, target_dir)
 end
 
 if not fs.exists(target_dir) then
