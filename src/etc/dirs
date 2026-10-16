@@ -1,0 +1,12 @@
+/bin
+/boot
+/dev
+/etc
+/home
+/home/user
+/lib
+/root
+/tmp
+/var
+/var/tmp
+/run

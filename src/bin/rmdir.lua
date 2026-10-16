@@ -2,13 +2,17 @@
 local args = { ... }
 
 if #args == 0 then
-    print("rmdir: missing operand")
-    return
+    printError("rmdir: missing operand")
+    os.exit(1)
 end
 
+local had_error = false
 for _, dir in ipairs(args) do
     local ok, err = fs.removeDir(dir)
     if not ok then
-        print("rmdir: failed to remove '" .. dir .. "': " .. tostring(err))
+        printError("rmdir: failed to remove '" .. dir .. "': " .. tostring(err))
+        had_error = true
     end
 end
+
+if had_error then os.exit(1) end

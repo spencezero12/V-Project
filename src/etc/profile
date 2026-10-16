@@ -1,0 +1,6 @@
+HOSTNAME=v-project
+VERSION=0.2.1-beta
+ARCH=cobalt-lua5.1
+PATH=/bin
+HOME=/home/user
+USER=user

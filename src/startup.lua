@@ -1,14 +1,12 @@
--- /startup.lua: Kernel v0.2.1 - Sandbox Blindado, VFS Consistente y Tuberías Multilínea
+-- /startup.lua: Kernel v0.2.2 - VFS Blindado, Ejecución Local (./) y Tokenizador POSIX
 local native_term = _G.term
 local native_fs = _G.fs
 local native_os = _G.os
 local pull_raw = native_os.pullEventRaw
 
--- Estrictamente necesario para el bootstrap inicial
 local BOOT_DIRS_CONF = "/etc/dirs"
 local BOOT_PROFILE_CONF = "/etc/profile"
 
--- Clonar tablas para impedir que un proceso altere las librerías globales del Kernel
 local function shallow_copy(tbl)
     if type(tbl) ~= "table" then return tbl end
     local copy = {}
@@ -16,7 +14,6 @@ local function shallow_copy(tbl)
     return copy
 end
 
--- Cargar configuración clave=valor desde /etc
 local function load_config(filepath, defaults)
     local conf = shallow_copy(defaults or {})
     if native_fs.exists(filepath) and not native_fs.isDir(filepath) then
@@ -37,11 +34,10 @@ local function load_config(filepath, defaults)
     return conf
 end
 
--- Rutina fsck: Verifica el árbol de directorios y limpia /tmp y /run al arrancar
 local function run_boot_fsck()
     local required_dirs = {
         "/bin", "/boot", "/dev", "/etc", "/home", "/home/user",
-        "/root", "/tmp", "/var", "/var/tmp", "/run"
+        "/lib", "/root", "/tmp", "/var", "/var/tmp", "/run"
     }
     if native_fs.exists(BOOT_DIRS_CONF) and not native_fs.isDir(BOOT_DIRS_CONF) then
         required_dirs = {}
@@ -68,7 +64,6 @@ local function run_boot_fsck()
         end
     end
 
-    -- Limpieza de directorios volátiles en arranque (cleanfs)
     local volatile_dirs = { "tmp", "run" }
     for _, vdir in ipairs(volatile_dirs) do
         if native_fs.exists(vdir) and native_fs.isDir(vdir) then
@@ -85,7 +80,7 @@ native_term.setCursorPos(1, 1)
 
 local env = load_config(BOOT_PROFILE_CONF, {
     HOSTNAME = "v-project",
-    VERSION = "0.2.1-beta",
+    VERSION = "0.2.2-beta",
     ARCH = "cobalt-lua5.1",
     PATH = "/bin",
     HOME = "/home/user",
@@ -101,7 +96,7 @@ print(":: Booting " .. env.HOSTNAME .. " (" .. env.VERSION .. ")...")
 print(":: fsck: tree verified (" .. fixed_dirs .. " created, /tmp & /run cleared).")
 native_term.setTextColor(colors.white or 1)
 
--- Syscall: Resolución universal de rutas
+-- Syscall: Resolución universal de rutas (soporta ~, ., .. y rutas relativas)
 local function vfs_resolve(target, current_pwd)
     current_pwd = current_pwd or env.PWD
     if not target or target == "" or target == "." then
@@ -118,22 +113,29 @@ local function vfs_resolve(target, current_pwd)
     end
 end
 
--- Protección de rutas críticas del sistema operativo
-local PROTECTED_PATHS = {
+-- Protección recursiva de rutas críticas del sistema operativo
+local PROTECTED_ROOTS = {
     [""] = true, ["rom"] = true, ["bin"] = true,
     ["boot"] = true, ["dev"] = true, ["etc"] = true,
-    ["startup.lua"] = true
+    ["lib"] = true, ["home"] = true, ["var"] = true,
+    ["tmp"] = true, ["run"] = true, ["startup.lua"] = true
 }
 
+local READONLY_TREES = { "rom", "bin", "boot", "etc", "lib" }
+
 local function is_protected_path(resolved)
-    return PROTECTED_PATHS[resolved] == true
+    if PROTECTED_ROOTS[resolved] then return true end
+    for _, tree in ipairs(READONLY_TREES) do
+        if string.sub(resolved, 1, #tree + 1) == tree .. "/" then
+            return true
+        end
+    end
+    return false
 end
 
--- Syscall: Generador de entorno aislado (Sandbox estricto)
 local function create_process_env(input_pipe, redirect_file, append_mode)
     local proc_env = {}
 
-    -- Copias independientes de librerías estándar (impide contaminación de _G)
     proc_env.string = shallow_copy(_G.string)
     proc_env.table = shallow_copy(_G.table)
     proc_env.math = shallow_copy(_G.math)
@@ -159,14 +161,22 @@ local function create_process_env(input_pipe, redirect_file, append_mode)
     proc_env.ENV = shallow_copy(env)
     proc_env.PWD = env.PWD
     proc_env.__PIPE_INPUT__ = input_pipe
+    proc_env.__IS_REDIRECTED__ = (redirect_file ~= nil)
     proc_env.EXIT_CODE = 0
 
-    -- VFS con preservación de rutas absolutas/relativas y validación de errores
     proc_env.fs = {
         resolve = function(p) return "/" .. vfs_resolve(p, proc_env.PWD) end,
         exists = function(p) return native_fs.exists(vfs_resolve(p, proc_env.PWD)) end,
         isDir = function(p) return native_fs.isDir(vfs_resolve(p, proc_env.PWD)) end,
-        getName = native_fs.getName,
+        getSize = function(p)
+            local r = vfs_resolve(p, proc_env.PWD)
+            if not native_fs.exists(r) or native_fs.isDir(r) then return 0 end
+            return native_fs.getSize(r)
+        end,
+        getName = function(p)
+            local r = vfs_resolve(p, proc_env.PWD)
+            return r == "" and "/" or native_fs.getName(r)
+        end,
         getDir = native_fs.getDir,
         combine = function(base, ...)
             local combined = native_fs.combine(base or "", ...)
@@ -244,6 +254,9 @@ local function create_process_env(input_pipe, redirect_file, append_mode)
         end,
         open = function(p, m)
             local resolved = vfs_resolve(p, proc_env.PWD)
+            if (m == "w" or m == "a") and is_protected_path(resolved) then
+                return nil, "Permission denied (protected path)"
+            end
             local parent = native_fs.getDir(resolved)
             if (m == "w" or m == "a") and parent ~= "" and not native_fs.exists(parent) then
                 return nil, "No such file or directory"
@@ -311,7 +324,6 @@ local function create_process_env(input_pipe, redirect_file, append_mode)
         return 1
     end
 
-    -- Canal de diagnóstico (STDERR): imprime en consola sin contaminar tuberías
     proc_env.printError = function(...)
         local parts = { ... }
         for i = 1, #parts do parts[i] = tostring(parts[i]) end
@@ -323,56 +335,127 @@ local function create_process_env(input_pipe, redirect_file, append_mode)
         native_term.setTextColor(prev_color)
     end
 
+    local loaded_modules = {}
+
+    proc_env.require = function(modname)
+        if type(modname) ~= "string" or modname == "" then
+            error("require: module name must be a non-empty string", 2)
+        end
+        if loaded_modules[modname] then return loaded_modules[modname] end
+
+        local clean_name = string.gsub(modname, "%.", "/")
+        local mod_path = "/lib/" .. clean_name .. ".lua"
+        local resolved = vfs_resolve(mod_path, proc_env.PWD)
+
+        if not native_fs.exists(resolved) or native_fs.isDir(resolved) then
+            error("module '" .. modname .. "' not found (searched in /lib/" .. clean_name .. ".lua)", 2)
+        end
+
+        local chunk, err = loadfile(resolved)
+        if not chunk then
+            error("error loading module '" .. modname .. "': " .. tostring(err), 2)
+        end
+
+        setfenv(chunk, proc_env)
+        local ok, result = pcall(chunk, modname)
+        if not ok then
+            error("error running module '" .. modname .. "': " .. tostring(result), 2)
+        end
+
+        local module_export = (result ~= nil) and result or true
+        loaded_modules[modname] = module_export
+        return module_export
+    end
+
     proc_env._G = proc_env
     return proc_env
 end
 
--- Tokenizador con soporte de comillas ("..." y '...') y expansión de variables ($VAR, $?)
+-- Tokenizador POSIX: Respeta escapes (\), comillas simples literales ('') y dobles ("")
 local function tokenize_input(input)
-    local tokens = {}
+    local raw_tokens = {}
     local current = ""
     local in_quote = nil
+    local has_content = false
+    local is_single_quoted = false
     local i = 1
+
+    local function push_token()
+        if has_content or #current > 0 then
+            table.insert(raw_tokens, { text = current, literal = is_single_quoted })
+            current = ""
+            has_content = false
+            is_single_quoted = false
+        end
+    end
+
     while i <= #input do
         local ch = string.sub(input, i, i)
         if in_quote then
             if ch == in_quote then
                 in_quote = nil
+            elseif ch == "\\" and in_quote == '"' and i < #input then
+                i = i + 1
+                current = current .. string.sub(input, i, i)
             else
                 current = current .. ch
             end
         else
-            if ch == '"' or ch == "'" then
+            if ch == "\\" and i < #input then
+                i = i + 1
+                current = current .. string.sub(input, i, i)
+                has_content = true
+            elseif ch == '"' or ch == "'" then
                 in_quote = ch
+                has_content = true
+                if ch == "'" and #current == 0 then is_single_quoted = true end
             elseif string.match(ch, "%s") then
-                if #current > 0 then
-                    table.insert(tokens, current)
-                    current = ""
-                end
+                push_token()
             elseif ch == "|" then
-                if #current > 0 then
-                    table.insert(tokens, current)
-                    current = ""
+                push_token()
+                table.insert(raw_tokens, { text = "|", literal = true })
+            elseif ch == ">" then
+                push_token()
+                if string.sub(input, i + 1, i + 1) == ">" then
+                    table.insert(raw_tokens, { text = ">>", literal = true })
+                    i = i + 1
+                else
+                    table.insert(raw_tokens, { text = ">", literal = true })
                 end
-                table.insert(tokens, "|")
             else
                 current = current .. ch
+                has_content = true
             end
         end
         i = i + 1
     end
-    if #current > 0 then table.insert(tokens, current) end
+    push_token()
 
-    -- Expandir variables de entorno ($?, $USER, $HOME, $PWD, etc.)
-    for idx, tok in ipairs(tokens) do
-        tok = string.gsub(tok, "%$(%w+)", function(var) return env[var] or "" end)
-        tok = string.gsub(tok, "%$%?", function() return env["?"] or "0" end)
-        tokens[idx] = tok
+    local tokens = {}
+    for _, item in ipairs(raw_tokens) do
+        local tok = item.text
+        if not item.literal then
+            tok = string.gsub(tok, "%$(%w+)", function(var) return env[var] or "" end)
+            tok = string.gsub(tok, "%$%?", function() return env["?"] or "0" end)
+        end
+        table.insert(tokens, tok)
     end
     return tokens
 end
 
+-- Localizador de ejecutables: Soporta rutas directas (./script.lua, /bin/ls) y búsqueda en PATH
 local function find_executable(cmd)
+    if string.find(cmd, "/", 1, true) then
+        local resolved = vfs_resolve(cmd, env.PWD)
+        if native_fs.exists(resolved) and not native_fs.isDir(resolved) then
+            return resolved
+        end
+        if native_fs.exists(resolved .. ".lua") and not native_fs.isDir(resolved .. ".lua") then
+            return resolved .. ".lua"
+        end
+        return nil
+    end
+
     for path_entry in string.gmatch(env.PATH, "[^:]+") do
         local candidate_lua = native_fs.combine(path_entry, cmd .. ".lua")
         if native_fs.exists(candidate_lua) and not native_fs.isDir(candidate_lua) then
@@ -400,6 +483,10 @@ local function execute_segment(tokens, input_pipe)
             if tokens[i + 1] then
                 redirect_file = vfs_resolve(tokens[i + 1], env.PWD)
                 i = i + 1
+            else
+                print("sh: syntax error near unexpected token `newline'")
+                env["?"] = "2"
+                return {}
             end
         else
             table.insert(parts, tok)
@@ -463,6 +550,11 @@ local function execute_segment(tokens, input_pipe)
     env["?"] = tostring(proc_env.EXIT_CODE or 0)
 
     if redirect_file then
+        if is_protected_path(redirect_file) then
+            proc_env.printError("sh: " .. redirect_file .. ": Permission denied")
+            env["?"] = "1"
+            return {}
+        end
         local parent = native_fs.getDir(redirect_file)
         if parent ~= "" and not native_fs.exists(parent) then
             proc_env.printError("sh: " .. redirect_file .. ": No such file or directory")
@@ -488,7 +580,11 @@ local function kernel_main()
     while true do
         native_term.setTextColor(colors.yellow or 1)
         local display_pwd = env.PWD
-        if env.PWD == env.HOME then display_pwd = "~" end
+        if env.PWD == env.HOME then
+            display_pwd = "~"
+        elseif string.sub(env.PWD, 1, #env.HOME + 1) == env.HOME .. "/" then
+            display_pwd = "~" .. string.sub(env.PWD, #env.HOME + 1)
+        end
         local prompt_symbol = (env.USER == "root") and "# " or "$ "
         native_term.write(env.USER .. "@" .. env.HOSTNAME .. ":" .. display_pwd .. prompt_symbol)
         native_term.setTextColor(colors.white or 1)
